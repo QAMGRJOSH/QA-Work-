@@ -1,0 +1,723 @@
+# Selenium Regression Testing Suite with Page Object Model (POM)
+# Complete framework for automated web application testing
+
+import unittest
+import time
+import json
+import os
+from datetime import datetime
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import Select
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
+
+# ===========================
+# Base Page Class
+# ===========================
+
+class BasePage:
+    """Base page class containing common functionality for all pages"""
+    
+    def __init__(self, driver):
+        self.driver = driver
+        self.wait = WebDriverWait(driver, 10)
+        
+    def find_element(self, locator):
+        """Find element with wait"""
+        return self.wait.until(EC.presence_of_element_located(locator))
+    
+    def find_elements(self, locator):
+        """Find multiple elements"""
+        return self.driver.find_elements(*locator)
+    
+    def click_element(self, locator):
+        """Click element with wait for clickability"""
+        element = self.wait.until(EC.element_to_be_clickable(locator))
+        element.click()
+        return element
+    
+    def enter_text(self, locator, text):
+        """Enter text into input field"""
+        element = self.find_element(locator)
+        element.clear()
+        element.send_keys(text)
+        return element
+    
+    def get_text(self, locator):
+        """Get text from element"""
+        return self.find_element(locator).text
+    
+    def is_element_present(self, locator, timeout=5):
+        """Check if element is present"""
+        try:
+            WebDriverWait(self.driver, timeout).until(
+                EC.presence_of_element_located(locator)
+            )
+            return True
+        except TimeoutException:
+            return False
+    
+    def is_element_visible(self, locator, timeout=5):
+        """Check if element is visible"""
+        try:
+            WebDriverWait(self.driver, timeout).until(
+                EC.visibility_of_element_located(locator)
+            )
+            return True
+        except TimeoutException:
+            return False
+    
+    def wait_for_element_to_disappear(self, locator, timeout=10):
+        """Wait for element to disappear"""
+        try:
+            WebDriverWait(self.driver, timeout).until_not(
+                EC.presence_of_element_located(locator)
+            )
+            return True
+        except TimeoutException:
+            return False
+    
+    def scroll_to_element(self, locator):
+        """Scroll to element"""
+        element = self.find_element(locator)
+        self.driver.execute_script("arguments[0].scrollIntoView();", element)
+        return element
+    
+    def hover_over_element(self, locator):
+        """Hover over element"""
+        element = self.find_element(locator)
+        ActionChains(self.driver).move_to_element(element).perform()
+        return element
+    
+    def select_dropdown_by_text(self, locator, text):
+        """Select dropdown option by visible text"""
+        element = self.find_element(locator)
+        select = Select(element)
+        select.select_by_visible_text(text)
+    
+    def get_page_title(self):
+        """Get current page title"""
+        return self.driver.title
+    
+    def get_current_url(self):
+        """Get current URL"""
+        return self.driver.current_url
+
+# ===========================
+# Page Object Classes
+# ===========================
+
+class LoginPage(BasePage):
+    """Login page object"""
+    
+    # Locators
+    USERNAME_INPUT = (By.ID, "username")
+    PASSWORD_INPUT = (By.ID, "password")
+    LOGIN_BUTTON = (By.ID, "login-btn")
+    ERROR_MESSAGE = (By.CLASS_NAME, "error-message")
+    FORGOT_PASSWORD_LINK = (By.LINK_TEXT, "Forgot Password?")
+    
+    def __init__(self, driver):
+        super().__init__(driver)
+        self.url = "https://example.com/login"
+    
+    def navigate_to_login(self):
+        """Navigate to login page"""
+        self.driver.get(self.url)
+        return self
+    
+    def enter_username(self, username):
+        """Enter username"""
+        self.enter_text(self.USERNAME_INPUT, username)
+        return self
+    
+    def enter_password(self, password):
+        """Enter password"""
+        self.enter_text(self.PASSWORD_INPUT, password)
+        return self
+    
+    def click_login(self):
+        """Click login button"""
+        self.click_element(self.LOGIN_BUTTON)
+        return self
+    
+    def login(self, username, password):
+        """Complete login process"""
+        self.enter_username(username)
+        self.enter_password(password)
+        self.click_login()
+        return self
+    
+    def get_error_message(self):
+        """Get error message text"""
+        if self.is_element_present(self.ERROR_MESSAGE):
+            return self.get_text(self.ERROR_MESSAGE)
+        return None
+    
+    def is_login_successful(self):
+        """Check if login was successful by checking URL change"""
+        return "/dashboard" in self.get_current_url()
+
+class DashboardPage(BasePage):
+    """Dashboard page object"""
+    
+    # Locators
+    WELCOME_MESSAGE = (By.CLASS_NAME, "welcome-message")
+    USER_MENU = (By.ID, "user-menu")
+    LOGOUT_BUTTON = (By.ID, "logout-btn")
+    NEW_FEATURE_BUTTON = (By.ID, "new-feature-btn")
+    NAVIGATION_MENU = (By.CLASS_NAME, "nav-menu")
+    NOTIFICATION_BELL = (By.ID, "notification-bell")
+    SEARCH_BOX = (By.ID, "search-box")
+    
+    def __init__(self, driver):
+        super().__init__(driver)
+        self.url = "https://example.com/dashboard"
+    
+    def is_dashboard_loaded(self):
+        """Check if dashboard is properly loaded"""
+        return self.is_element_present(self.WELCOME_MESSAGE)
+    
+    def get_welcome_message(self):
+        """Get welcome message text"""
+        return self.get_text(self.WELCOME_MESSAGE)
+    
+    def click_new_feature(self):
+        """Click new feature button"""
+        self.click_element(self.NEW_FEATURE_BUTTON)
+        return self
+    
+    def logout(self):
+        """Perform logout"""
+        self.click_element(self.USER_MENU)
+        self.click_element(self.LOGOUT_BUTTON)
+        return self
+    
+    def search(self, query):
+        """Perform search"""
+        self.enter_text(self.SEARCH_BOX, query)
+        self.find_element(self.SEARCH_BOX).send_keys(Keys.RETURN)
+        return self
+
+class NewFeaturePage(BasePage):
+    """New feature page object - the feature being tested"""
+    
+    # Locators
+    FEATURE_TITLE = (By.H1, "feature-title")
+    CREATE_ITEM_BUTTON = (By.ID, "create-item-btn")
+    ITEM_NAME_INPUT = (By.ID, "item-name")
+    ITEM_DESCRIPTION_INPUT = (By.ID, "item-description")
+    ITEM_CATEGORY_DROPDOWN = (By.ID, "item-category")
+    SAVE_BUTTON = (By.ID, "save-btn")
+    CANCEL_BUTTON = (By.ID, "cancel-btn")
+    ITEMS_LIST = (By.CLASS_NAME, "items-list")
+    ITEM_ROW = (By.CLASS_NAME, "item-row")
+    DELETE_BUTTON = (By.CLASS_NAME, "delete-btn")
+    EDIT_BUTTON = (By.CLASS_NAME, "edit-btn")
+    SUCCESS_MESSAGE = (By.CLASS_NAME, "success-message")
+    ERROR_MESSAGE = (By.CLASS_NAME, "error-message")
+    LOADING_SPINNER = (By.CLASS_NAME, "loading-spinner")
+    
+    def __init__(self, driver):
+        super().__init__(driver)
+        self.url = "https://example.com/new-feature"
+    
+    def is_feature_page_loaded(self):
+        """Check if new feature page is loaded"""
+        return self.is_element_present(self.FEATURE_TITLE)
+    
+    def click_create_item(self):
+        """Click create new item button"""
+        self.click_element(self.CREATE_ITEM_BUTTON)
+        return self
+    
+    def create_new_item(self, name, description, category):
+        """Create a new item with given details"""
+        self.click_create_item()
+        self.enter_text(self.ITEM_NAME_INPUT, name)
+        self.enter_text(self.ITEM_DESCRIPTION_INPUT, description)
+        self.select_dropdown_by_text(self.ITEM_CATEGORY_DROPDOWN, category)
+        self.click_element(self.SAVE_BUTTON)
+        
+        # Wait for loading to complete
+        if self.is_element_present(self.LOADING_SPINNER, timeout=2):
+            self.wait_for_element_to_disappear(self.LOADING_SPINNER)
+        
+        return self
+    
+    def get_items_count(self):
+        """Get count of items in the list"""
+        items = self.find_elements(self.ITEM_ROW)
+        return len(items)
+    
+    def get_success_message(self):
+        """Get success message text"""
+        if self.is_element_present(self.SUCCESS_MESSAGE):
+            return self.get_text(self.SUCCESS_MESSAGE)
+        return None
+    
+    def get_error_message(self):
+        """Get error message text"""
+        if self.is_element_present(self.ERROR_MESSAGE):
+            return self.get_text(self.ERROR_MESSAGE)
+        return None
+    
+    def delete_first_item(self):
+        """Delete the first item in the list"""
+        delete_buttons = self.find_elements(self.DELETE_BUTTON)
+        if delete_buttons:
+            delete_buttons[0].click()
+            # Handle confirmation dialog if present
+            try:
+                alert = self.driver.switch_to.alert
+                alert.accept()
+            except:
+                pass
+        return self
+    
+    def edit_first_item(self, new_name):
+        """Edit the first item in the list"""
+        edit_buttons = self.find_elements(self.EDIT_BUTTON)
+        if edit_buttons:
+            edit_buttons[0].click()
+            self.enter_text(self.ITEM_NAME_INPUT, new_name)
+            self.click_element(self.SAVE_BUTTON)
+        return self
+
+# ===========================
+# Test Data Management
+# ===========================
+
+class TestData:
+    """Test data management class"""
+    
+    VALID_USER = {
+        "username": "testuser@example.com",
+        "password": "TestPassword123"
+    }
+    
+    INVALID_USER = {
+        "username": "invalid@example.com",
+        "password": "wrongpassword"
+    }
+    
+    TEST_ITEMS = [
+        {
+            "name": "Test Item 1",
+            "description": "This is a test item for automation",
+            "category": "Category A"
+        },
+        {
+            "name": "Test Item 2",
+            "description": "Another test item for validation",
+            "category": "Category B"
+        }
+    ]
+
+# ===========================
+# Test Configuration
+# ===========================
+
+class TestConfig:
+    """Test configuration class"""
+    
+    # Browser settings
+    BROWSER = "chrome"  # chrome, firefox, edge
+    HEADLESS = False
+    WINDOW_SIZE = "1920,1080"
+    IMPLICIT_WAIT = 10
+    PAGE_LOAD_TIMEOUT = 30
+    
+    # Test settings
+    BASE_URL = "https://example.com"
+    SCREENSHOT_ON_FAILURE = True
+    SCREENSHOT_DIR = "screenshots"
+    
+    # Report settings
+    REPORT_DIR = "reports"
+    GENERATE_HTML_REPORT = True
+
+# ===========================
+# Driver Management
+# ===========================
+
+class DriverManager:
+    """WebDriver management class"""
+    
+    @staticmethod
+    def get_driver(browser=TestConfig.BROWSER, headless=TestConfig.HEADLESS):
+        """Get WebDriver instance"""
+        
+        if browser.lower() == "chrome":
+            options = Options()
+            if headless:
+                options.add_argument("--headless")
+            options.add_argument(f"--window-size={TestConfig.WINDOW_SIZE}")
+            options.add_argument("--no-sandbox")
+            options.add_argument("--disable-dev-shm-usage")
+            driver = webdriver.Chrome(options=options)
+        
+        elif browser.lower() == "firefox":
+            from selenium.webdriver.firefox.options import Options as FirefoxOptions
+            options = FirefoxOptions()
+            if headless:
+                options.add_argument("--headless")
+            driver = webdriver.Firefox(options=options)
+        
+        else:
+            raise ValueError(f"Unsupported browser: {browser}")
+        
+        driver.implicitly_wait(TestConfig.IMPLICIT_WAIT)
+        driver.set_page_load_timeout(TestConfig.PAGE_LOAD_TIMEOUT)
+        
+        return driver
+
+# ===========================
+# Test Base Class
+# ===========================
+
+class BaseTest(unittest.TestCase):
+    """Base test class with common setup and teardown"""
+    
+    @classmethod
+    def setUpClass(cls):
+        """Set up test class"""
+        cls.driver = DriverManager.get_driver()
+        cls.test_results = []
+        
+        # Create directories
+        os.makedirs(TestConfig.SCREENSHOT_DIR, exist_ok=True)
+        os.makedirs(TestConfig.REPORT_DIR, exist_ok=True)
+    
+    @classmethod
+    def tearDownClass(cls):
+        """Tear down test class"""
+        if hasattr(cls, 'driver'):
+            cls.driver.quit()
+        
+        # Generate test report
+        cls._generate_test_report()
+    
+    def setUp(self):
+        """Set up individual test"""
+        self.start_time = time.time()
+    
+    def tearDown(self):
+        """Tear down individual test"""
+        # Record test result
+        test_result = {
+            "test_name": self._testMethodName,
+            "status": "PASS" if self._outcome.success else "FAIL",
+            "duration": round(time.time() - self.start_time, 2),
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Add error details if test failed
+        if not self._outcome.success:
+            errors = []
+            for error in self._outcome.errors:
+                if error[1]:
+                    errors.append(str(error[1]))
+            test_result["errors"] = errors
+            
+            # Take screenshot on failure
+            if TestConfig.SCREENSHOT_ON_FAILURE:
+                self._take_screenshot()
+        
+        self.__class__.test_results.append(test_result)
+    
+    def _take_screenshot(self):
+        """Take screenshot on test failure"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{self._testMethodName}_{timestamp}.png"
+        filepath = os.path.join(TestConfig.SCREENSHOT_DIR, filename)
+        self.driver.save_screenshot(filepath)
+        print(f"Screenshot saved: {filepath}")
+    
+    @classmethod
+    def _generate_test_report(cls):
+        """Generate test execution report"""
+        report = {
+            "execution_time": datetime.now().isoformat(),
+            "total_tests": len(cls.test_results),
+            "passed": len([r for r in cls.test_results if r["status"] == "PASS"]),
+            "failed": len([r for r in cls.test_results if r["status"] == "FAIL"]),
+            "test_results": cls.test_results
+        }
+        
+        # Save JSON report
+        json_file = os.path.join(TestConfig.REPORT_DIR, "test_report.json")
+        with open(json_file, 'w') as f:
+            json.dump(report, f, indent=2)
+        
+        print(f"\nTest Report Generated: {json_file}")
+        print(f"Total Tests: {report['total_tests']}")
+        print(f"Passed: {report['passed']}")
+        print(f"Failed: {report['failed']}")
+        print(f"Success Rate: {(report['passed']/report['total_tests']*100):.1f}%")
+
+# ===========================
+# Regression Test Suite
+# ===========================
+
+class NewFeatureRegressionTests(BaseTest):
+    """Regression tests for the new feature"""
+    
+    def setUp(self):
+        super().setUp()
+        # Initialize page objects
+        self.login_page = LoginPage(self.driver)
+        self.dashboard_page = DashboardPage(self.driver)
+        self.feature_page = NewFeaturePage(self.driver)
+        
+        # Login before each test
+        self._login_as_valid_user()
+    
+    def _login_as_valid_user(self):
+        """Helper method to login with valid credentials"""
+        self.login_page.navigate_to_login()
+        self.login_page.login(
+            TestData.VALID_USER["username"],
+            TestData.VALID_USER["password"]
+        )
+        self.assertTrue(self.login_page.is_login_successful())
+    
+    def test_01_login_functionality(self):
+        """Test login functionality - regression test"""
+        # This should already be done in setUp, but verify
+        self.assertTrue(self.dashboard_page.is_dashboard_loaded())
+        welcome_msg = self.dashboard_page.get_welcome_message()
+        self.assertIsNotNone(welcome_msg)
+        print("✓ Login functionality working correctly")
+    
+    def test_02_dashboard_navigation(self):
+        """Test dashboard navigation - regression test"""
+        self.assertTrue(self.dashboard_page.is_dashboard_loaded())
+        
+        # Test navigation to new feature
+        self.dashboard_page.click_new_feature()
+        self.assertTrue(self.feature_page.is_feature_page_loaded())
+        print("✓ Dashboard navigation working correctly")
+    
+    def test_03_new_feature_page_load(self):
+        """Test new feature page loads correctly"""
+        self.dashboard_page.click_new_feature()
+        self.assertTrue(self.feature_page.is_feature_page_loaded())
+        
+        # Verify page elements are present
+        self.assertTrue(self.feature_page.is_element_present(
+            self.feature_page.CREATE_ITEM_BUTTON
+        ))
+        print("✓ New feature page loads correctly")
+    
+    def test_04_create_new_item(self):
+        """Test creating a new item - core new functionality"""
+        self.dashboard_page.click_new_feature()
+        
+        # Get initial count
+        initial_count = self.feature_page.get_items_count()
+        
+        # Create new item
+        test_item = TestData.TEST_ITEMS[0]
+        self.feature_page.create_new_item(
+            test_item["name"],
+            test_item["description"],
+            test_item["category"]
+        )
+        
+        # Verify success
+        success_msg = self.feature_page.get_success_message()
+        self.assertIsNotNone(success_msg)
+        
+        # Verify item count increased
+        new_count = self.feature_page.get_items_count()
+        self.assertEqual(new_count, initial_count + 1)
+        print("✓ New item creation working correctly")
+    
+    def test_05_create_multiple_items(self):
+        """Test creating multiple items"""
+        self.dashboard_page.click_new_feature()
+        
+        initial_count = self.feature_page.get_items_count()
+        
+        # Create multiple items
+        for item in TestData.TEST_ITEMS:
+            self.feature_page.create_new_item(
+                item["name"],
+                item["description"],
+                item["category"]
+            )
+            time.sleep(1)  # Small delay between creations
+        
+        # Verify all items were created
+        final_count = self.feature_page.get_items_count()
+        expected_count = initial_count + len(TestData.TEST_ITEMS)
+        self.assertEqual(final_count, expected_count)
+        print("✓ Multiple item creation working correctly")
+    
+    def test_06_edit_item(self):
+        """Test editing an existing item"""
+        self.dashboard_page.click_new_feature()
+        
+        # Create an item first
+        test_item = TestData.TEST_ITEMS[0]
+        self.feature_page.create_new_item(
+            test_item["name"],
+            test_item["description"],
+            test_item["category"]
+        )
+        
+        # Edit the item
+        new_name = "Updated Item Name"
+        self.feature_page.edit_first_item(new_name)
+        
+        # Verify edit was successful
+        success_msg = self.feature_page.get_success_message()
+        self.assertIsNotNone(success_msg)
+        print("✓ Item editing working correctly")
+    
+    def test_07_delete_item(self):
+        """Test deleting an item"""
+        self.dashboard_page.click_new_feature()
+        
+        # Create an item first
+        test_item = TestData.TEST_ITEMS[0]
+        self.feature_page.create_new_item(
+            test_item["name"],
+            test_item["description"],
+            test_item["category"]
+        )
+        
+        initial_count = self.feature_page.get_items_count()
+        
+        # Delete the item
+        self.feature_page.delete_first_item()
+        
+        # Verify deletion
+        final_count = self.feature_page.get_items_count()
+        self.assertEqual(final_count, initial_count - 1)
+        print("✓ Item deletion working correctly")
+    
+    def test_08_invalid_input_handling(self):
+        """Test handling of invalid inputs"""
+        self.dashboard_page.click_new_feature()
+        
+        # Try to create item with empty name
+        self.feature_page.click_create_item()
+        self.feature_page.enter_text(self.feature_page.ITEM_NAME_INPUT, "")
+        self.feature_page.enter_text(
+            self.feature_page.ITEM_DESCRIPTION_INPUT, 
+            "Description without name"
+        )
+        self.feature_page.click_element(self.feature_page.SAVE_BUTTON)
+        
+        # Verify error message appears
+        error_msg = self.feature_page.get_error_message()
+        self.assertIsNotNone(error_msg)
+        print("✓ Invalid input handling working correctly")
+    
+    def test_09_logout_functionality(self):
+        """Test logout functionality - regression test"""
+        self.dashboard_page.logout()
+        
+        # Verify redirected to login page
+        current_url = self.driver.current_url
+        self.assertIn("login", current_url.lower())
+        print("✓ Logout functionality working correctly")
+    
+    def test_10_search_functionality(self):
+        """Test search functionality - regression test"""
+        # Search from dashboard
+        search_query = "test"
+        self.dashboard_page.search(search_query)
+        
+        # Verify search was performed (URL change or results shown)
+        current_url = self.dashboard_page.get_current_url()
+        self.assertTrue(
+            "search" in current_url or "q=" in current_url,
+            "Search functionality appears to not be working"
+        )
+        print("✓ Search functionality working correctly")
+
+# ===========================
+# Test Runner
+# ===========================
+
+def run_regression_tests():
+    """Main function to run regression tests"""
+    print("="*60)
+    print("STARTING NEW FEATURE REGRESSION TEST SUITE")
+    print("="*60)
+    
+    # Create test suite
+    test_suite = unittest.TestLoader().loadTestsFromTestCase(
+        NewFeatureRegressionTests
+    )
+    
+    # Run tests with verbose output
+    runner = unittest.TextTestRunner(
+        verbosity=2,
+        stream=None,
+        buffer=True
+    )
+    
+    result = runner.run(test_suite)
+    
+    print("\n" + "="*60)
+    print("REGRESSION TEST SUITE COMPLETED")
+    print("="*60)
+    
+    return result.wasSuccessful()
+
+# ===========================
+# Advanced Test Utilities
+# ===========================
+
+class TestUtilities:
+    """Additional utility functions for testing"""
+    
+    @staticmethod
+    def wait_for_page_load(driver, timeout=30):
+        """Wait for page to fully load"""
+        WebDriverWait(driver, timeout).until(
+            lambda driver: driver.execute_script("return document.readyState") == "complete"
+        )
+    
+    @staticmethod
+    def get_network_logs(driver):
+        """Get network logs (Chrome only)"""
+        logs = driver.get_log('performance')
+        return logs
+    
+    @staticmethod
+    def clear_browser_cache(driver):
+        """Clear browser cache"""
+        driver.delete_all_cookies()
+        driver.execute_script("window.localStorage.clear();")
+        driver.execute_script("window.sessionStorage.clear();")
+    
+    @staticmethod
+    def capture_full_page_screenshot(driver, filename):
+        """Capture full page screenshot"""
+        # Get page dimensions
+        total_height = driver.execute_script("return document.body.scrollHeight")
+        viewport_height = driver.execute_script("return window.innerHeight")
+        
+        # Take screenshot of full page
+        driver.set_window_size(1920, total_height)
+        driver.save_screenshot(filename)
+        
+        # Reset window size
+        driver.set_window_size(1920, 1080)
+
+if __name__ == "__main__":
+    # Run the regression test suite
+    success = run_regression_tests()
+    
+    # Exit with appropriate code
+    exit(0 if success else 1)
