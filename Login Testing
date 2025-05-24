@@ -1,0 +1,812 @@
+# Comprehensive Login Testing Suite
+# Tests login functionality for different user types: Admin, Guest, Registered Users
+
+import unittest
+import time
+import json
+import os
+from datetime import datetime, timedelta
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from enum import Enum
+import logging
+
+# ===========================
+# Configuration and Enums
+# ===========================
+
+class UserType(Enum):
+    """User type enumeration"""
+    ADMIN = "admin"
+    REGISTERED = "registered"
+    GUEST = "guest"
+    PREMIUM = "premium"
+    SUSPENDED = "suspended"
+
+class LoginResult(Enum):
+    """Login result enumeration"""
+    SUCCESS = "success"
+    INVALID_CREDENTIALS = "invalid_credentials"
+    ACCOUNT_LOCKED = "account_locked"
+    ACCOUNT_SUSPENDED = "account_suspended"
+    ACCOUNT_EXPIRED = "account_expired"
+    PASSWORD_EXPIRED = "password_expired"
+    MFA_REQUIRED = "mfa_required"
+    CAPTCHA_REQUIRED = "captcha_required"
+
+class TestConfig:
+    """Test configuration"""
+    BASE_URL = "https://example.com"
+    IMPLICIT_WAIT = 10
+    EXPLICIT_WAIT = 15
+    SCREENSHOT_DIR = "screenshots/login_tests"
+    REPORT_DIR = "reports"
+    HEADLESS = False
+    BROWSER = "chrome"
+    
+    # Login attempt limits
+    MAX_LOGIN_ATTEMPTS = 3
+    LOCKOUT_DURATION = 300  # 5 minutes
+
+# ===========================
+# Test Data Management
+# ===========================
+
+class LoginTestData:
+    """Centralized test data for different user types"""
+    
+    # Admin Users
+    ADMIN_USERS = {
+        "super_admin": {
+            "username": "superadmin@example.com",
+            "password": "SuperAdmin123!",
+            "expected_role": "Super Administrator",
+            "expected_permissions": ["user_management", "system_config", "reports"],
+            "expected_redirect": "/admin/dashboard",
+            "mfa_enabled": True
+        },
+        "admin": {
+            "username": "admin@example.com",
+            "password": "Admin123!",
+            "expected_role": "Administrator",
+            "expected_permissions": ["user_management", "reports"],
+            "expected_redirect": "/admin/dashboard",
+            "mfa_enabled": False
+        }
+    }
+    
+    # Registered Users
+    REGISTERED_USERS = {
+        "premium_user": {
+            "username": "premium@example.com",
+            "password": "Premium123!",
+            "expected_role": "Premium User",
+            "expected_permissions": ["premium_features", "export_data"],
+            "expected_redirect": "/dashboard",
+            "subscription_status": "active",
+            "mfa_enabled": False
+        },
+        "regular_user": {
+            "username": "user@example.com",
+            "password": "User123!",
+            "expected_role": "Regular User",
+            "expected_permissions": ["basic_features"],
+            "expected_redirect": "/dashboard",
+            "subscription_status": "free",
+            "mfa_enabled": False
+        },
+        "trial_user": {
+            "username": "trial@example.com",
+            "password": "Trial123!",
+            "expected_role": "Trial User",
+            "expected_permissions": ["basic_features"],
+            "expected_redirect": "/dashboard",
+            "subscription_status": "trial",
+            "trial_expires": datetime.now() + timedelta(days=7),
+            "mfa_enabled": False
+        }
+    }
+    
+    # Problem Users (for negative testing)
+    PROBLEM_USERS = {
+        "suspended_user": {
+            "username": "suspended@example.com",
+            "password": "Suspended123!",
+            "status": "suspended",
+            "expected_result": LoginResult.ACCOUNT_SUSPENDED
+        },
+        "expired_user": {
+            "username": "expired@example.com",
+            "password": "Expired123!",
+            "status": "expired",
+            "expected_result": LoginResult.ACCOUNT_EXPIRED
+        },
+        "locked_user": {
+            "username": "locked@example.com",
+            "password": "Locked123!",
+            "status": "locked",
+            "expected_result": LoginResult.ACCOUNT_LOCKED
+        },
+        "password_expired_user": {
+            "username": "pwdexpired@example.com",
+            "password": "OldPassword123!",
+            "status": "password_expired",
+            "expected_result": LoginResult.PASSWORD_EXPIRED
+        }
+    }
+    
+    # Guest User (no registration required)
+    GUEST_USER = {
+        "access_level": "guest",
+        "expected_redirect": "/guest/dashboard",
+        "expected_permissions": ["view_public_content"],
+        "session_duration": 3600  # 1 hour
+    }
+    
+    # Invalid Credentials for Testing
+    INVALID_CREDENTIALS = [
+        {"username": "nonexistent@example.com", "password": "WrongPass123!"},
+        {"username": "admin@example.com", "password": "wrongpassword"},
+        {"username": "", "password": "SomePassword123!"},
+        {"username": "user@example.com", "password": ""},
+        {"username": "", "password": ""},
+        {"username": "user@example.com", "password": "short"},
+        {"username": "invalid-email", "password": "ValidPass123!"},
+    ]
+    
+    # SQL Injection and Security Test Cases
+    SECURITY_TEST_CASES = [
+        {"username": "admin'; DROP TABLE users; --", "password": "password"},
+        {"username": "admin", "password": "' OR '1'='1"},
+        {"username": "<script>alert('XSS')</script>", "password": "password"},
+        {"username": "admin", "password": "admin' OR 1=1 --"},
+        {"username": "../../etc/passwd", "password": "password"},
+    ]
+
+# ===========================
+# Page Objects
+# ===========================
+
+class BasePage:
+    """Base page with common functionality"""
+    
+    def __init__(self, driver):
+        self.driver = driver
+        self.wait = WebDriverWait(driver, TestConfig.EXPLICIT_WAIT)
+    
+    def find_element(self, locator, timeout=None):
+        """Find element with explicit wait"""
+        wait_time = timeout or TestConfig.EXPLICIT_WAIT
+        return WebDriverWait(self.driver, wait_time).until(
+            EC.presence_of_element_located(locator)
+        )
+    
+    def find_elements(self, locator):
+        """Find multiple elements"""
+        return self.driver.find_elements(*locator)
+    
+    def click_element(self, locator, timeout=None):
+        """Click element with wait"""
+        wait_time = timeout or TestConfig.EXPLICIT_WAIT
+        element = WebDriverWait(self.driver, wait_time).until(
+            EC.element_to_be_clickable(locator)
+        )
+        element.click()
+        return element
+    
+    def enter_text(self, locator, text, clear_first=True):
+        """Enter text into input field"""
+        element = self.find_element(locator)
+        if clear_first:
+            element.clear()
+        element.send_keys(text)
+        return element
+    
+    def get_text(self, locator):
+        """Get text from element"""
+        return self.find_element(locator).text
+    
+    def is_element_present(self, locator, timeout=5):
+        """Check if element is present"""
+        try:
+            WebDriverWait(self.driver, timeout).until(
+                EC.presence_of_element_located(locator)
+            )
+            return True
+        except TimeoutException:
+            return False
+    
+    def is_element_visible(self, locator, timeout=5):
+        """Check if element is visible"""
+        try:
+            WebDriverWait(self.driver, timeout).until(
+                EC.visibility_of_element_located(locator)
+            )
+            return True
+        except TimeoutException:
+            return False
+    
+    def wait_for_url_change(self, current_url, timeout=10):
+        """Wait for URL to change from current URL"""
+        WebDriverWait(self.driver, timeout).until(
+            lambda driver: driver.current_url != current_url
+        )
+    
+    def get_current_url(self):
+        """Get current page URL"""
+        return self.driver.current_url
+    
+    def get_page_title(self):
+        """Get page title"""
+        return self.driver.title
+
+class LoginPage(BasePage):
+    """Login page object"""
+    
+    # Locators
+    USERNAME_INPUT = (By.ID, "username")
+    PASSWORD_INPUT = (By.ID, "password")
+    LOGIN_BUTTON = (By.ID, "login-btn")
+    GUEST_LOGIN_BUTTON = (By.ID, "guest-login-btn")
+    FORGOT_PASSWORD_LINK = (By.ID, "forgot-password")
+    REMEMBER_ME_CHECKBOX = (By.ID, "remember-me")
+    
+    # Error/Success Messages
+    ERROR_MESSAGE = (By.CLASS_NAME, "error-message")
+    SUCCESS_MESSAGE = (By.CLASS_NAME, "success-message")
+    VALIDATION_ERROR = (By.CLASS_NAME, "validation-error")
+    
+    # Security Features
+    CAPTCHA_IMAGE = (By.ID, "captcha-image")
+    CAPTCHA_INPUT = (By.ID, "captcha-input")
+    CAPTCHA_REFRESH = (By.ID, "captcha-refresh")
+    
+    # MFA Elements
+    MFA_CODE_INPUT = (By.ID, "mfa-code")
+    MFA_SUBMIT_BUTTON = (By.ID, "mfa-submit")
+    MFA_MESSAGE = (By.CLASS_NAME, "mfa-message")
+    
+    # Account Status Messages
+    ACCOUNT_LOCKED_MESSAGE = (By.CLASS_NAME, "account-locked")
+    ACCOUNT_SUSPENDED_MESSAGE = (By.CLASS_NAME, "account-suspended")
+    PASSWORD_EXPIRED_MESSAGE = (By.CLASS_NAME, "password-expired")
+    
+    def __init__(self, driver):
+        super().__init__(driver)
+        self.url = f"{TestConfig.BASE_URL}/login"
+    
+    def navigate_to_login(self):
+        """Navigate to login page"""
+        self.driver.get(self.url)
+        return self
+    
+    def enter_username(self, username):
+        """Enter username"""
+        self.enter_text(self.USERNAME_INPUT, username)
+        return self
+    
+    def enter_password(self, password):
+        """Enter password"""
+        self.enter_text(self.PASSWORD_INPUT, password)
+        return self
+    
+    def click_login(self):
+        """Click login button"""
+        current_url = self.get_current_url()
+        self.click_element(self.LOGIN_BUTTON)
+        return current_url
+    
+    def login_as_user(self, username, password, remember_me=False):
+        """Complete login process"""
+        self.enter_username(username)
+        self.enter_password(password)
+        
+        if remember_me:
+            self.click_element(self.REMEMBER_ME_CHECKBOX)
+        
+        return self.click_login()
+    
+    def login_as_guest(self):
+        """Login as guest user"""
+        current_url = self.get_current_url()
+        self.click_element(self.GUEST_LOGIN_BUTTON)
+        return current_url
+    
+    def get_error_message(self):
+        """Get error message"""
+        if self.is_element_present(self.ERROR_MESSAGE):
+            return self.get_text(self.ERROR_MESSAGE)
+        return None
+    
+    def get_validation_errors(self):
+        """Get all validation error messages"""
+        errors = []
+        if self.is_element_present(self.VALIDATION_ERROR):
+            error_elements = self.find_elements(self.VALIDATION_ERROR)
+            errors = [elem.text for elem in error_elements]
+        return errors
+    
+    def is_captcha_present(self):
+        """Check if CAPTCHA is present"""
+        return self.is_element_present(self.CAPTCHA_IMAGE)
+    
+    def is_mfa_required(self):
+        """Check if MFA is required"""
+        return self.is_element_present(self.MFA_CODE_INPUT)
+    
+    def enter_mfa_code(self, code):
+        """Enter MFA code"""
+        self.enter_text(self.MFA_CODE_INPUT, code)
+        self.click_element(self.MFA_SUBMIT_BUTTON)
+        return self
+    
+    def get_account_status_message(self):
+        """Get account status message"""
+        if self.is_element_present(self.ACCOUNT_LOCKED_MESSAGE):
+            return ("locked", self.get_text(self.ACCOUNT_LOCKED_MESSAGE))
+        elif self.is_element_present(self.ACCOUNT_SUSPENDED_MESSAGE):
+            return ("suspended", self.get_text(self.ACCOUNT_SUSPENDED_MESSAGE))
+        elif self.is_element_present(self.PASSWORD_EXPIRED_MESSAGE):
+            return ("password_expired", self.get_text(self.PASSWORD_EXPIRED_MESSAGE))
+        return (None, None)
+
+class DashboardPage(BasePage):
+    """Dashboard page object"""
+    
+    # Common Dashboard Elements
+    USER_MENU = (By.ID, "user-menu")
+    USER_NAME_DISPLAY = (By.CLASS_NAME, "user-name")
+    USER_ROLE_DISPLAY = (By.CLASS_NAME, "user-role")
+    LOGOUT_BUTTON = (By.ID, "logout-btn")
+    
+    # Navigation Menu
+    NAVIGATION_MENU = (By.CLASS_NAME, "nav-menu")
+    ADMIN_MENU = (By.ID, "admin-menu")
+    USER_MANAGEMENT_LINK = (By.ID, "user-management")
+    REPORTS_LINK = (By.ID, "reports")
+    SETTINGS_LINK = (By.ID, "settings")
+    
+    # Content Areas
+    DASHBOARD_CONTENT = (By.ID, "dashboard-content")
+    WELCOME_MESSAGE = (By.CLASS_NAME, "welcome-message")
+    
+    # Premium Features
+    PREMIUM_BADGE = (By.CLASS_NAME, "premium-badge")
+    EXPORT_BUTTON = (By.ID, "export-btn")
+    
+    # Trial Information
+    TRIAL_INFO = (By.CLASS_NAME, "trial-info")
+    DAYS_REMAINING = (By.CLASS_NAME, "days-remaining")
+    
+    def __init__(self, driver):
+        super().__init__(driver)
+    
+    def is_dashboard_loaded(self):
+        """Check if dashboard is loaded"""
+        return self.is_element_present(self.DASHBOARD_CONTENT)
+    
+    def get_user_name(self):
+        """Get displayed user name"""
+        if self.is_element_present(self.USER_NAME_DISPLAY):
+            return self.get_text(self.USER_NAME_DISPLAY)
+        return None
+    
+    def get_user_role(self):
+        """Get displayed user role"""
+        if self.is_element_present(self.USER_ROLE_DISPLAY):
+            return self.get_text(self.USER_ROLE_DISPLAY)
+        return None
+    
+    def is_admin_menu_visible(self):
+        """Check if admin menu is visible"""
+        return self.is_element_visible(self.ADMIN_MENU)
+    
+    def is_premium_badge_visible(self):
+        """Check if premium badge is visible"""
+        return self.is_element_visible(self.PREMIUM_BADGE)
+    
+    def get_available_menu_items(self):
+        """Get list of available menu items"""
+        menu_items = []
+        if self.is_element_present(self.NAVIGATION_MENU):
+            nav_links = self.find_elements((By.TAG_NAME, "a"))
+            menu_items = [link.text for link in nav_links if link.text]
+        return menu_items
+    
+    def logout(self):
+        """Perform logout"""
+        self.click_element(self.USER_MENU)
+        self.click_element(self.LOGOUT_BUTTON)
+        return self
+
+class GuestDashboardPage(BasePage):
+    """Guest dashboard page object"""
+    
+    GUEST_CONTENT = (By.ID, "guest-content")
+    LIMITED_ACCESS_MESSAGE = (By.CLASS_NAME, "limited-access")
+    REGISTER_PROMPT = (By.CLASS_NAME, "register-prompt")
+    PUBLIC_CONTENT = (By.CLASS_NAME, "public-content")
+    RESTRICTED_CONTENT = (By.CLASS_NAME, "restricted-content")
+    
+    def __init__(self, driver):
+        super().__init__(driver)
+    
+    def is_guest_dashboard_loaded(self):
+        """Check if guest dashboard is loaded"""
+        return self.is_element_present(self.GUEST_CONTENT)
+    
+    def has_limited_access_message(self):
+        """Check if limited access message is shown"""
+        return self.is_element_present(self.LIMITED_ACCESS_MESSAGE)
+    
+    def can_access_restricted_content(self):
+        """Check if restricted content is accessible"""
+        return self.is_element_present(self.RESTRICTED_CONTENT)
+
+# ===========================
+# Test Base Class
+# ===========================
+
+class LoginTestBase(unittest.TestCase):
+    """Base class for login tests"""
+    
+    @classmethod
+    def setUpClass(cls):
+        """Set up test class"""
+        # Setup logging
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s'
+        )
+        cls.logger = logging.getLogger(__name__)
+        
+        # Create directories
+        os.makedirs(TestConfig.SCREENSHOT_DIR, exist_ok=True)
+        os.makedirs(TestConfig.REPORT_DIR, exist_ok=True)
+        
+        # Initialize driver
+        cls.driver = cls._create_driver()
+        cls.test_results = []
+    
+    @classmethod
+    def _create_driver(cls):
+        """Create WebDriver instance"""
+        options = Options()
+        if TestConfig.HEADLESS:
+            options.add_argument("--headless")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--window-size=1920,1080")
+        
+        driver = webdriver.Chrome(options=options)
+        driver.implicitly_wait(TestConfig.IMPLICIT_WAIT)
+        return driver
+    
+    @classmethod
+    def tearDownClass(cls):
+        """Clean up test class"""
+        if hasattr(cls, 'driver'):
+            cls.driver.quit()
+        cls._generate_test_report()
+    
+    def setUp(self):
+        """Set up individual test"""
+        self.start_time = time.time()
+        self.login_page = LoginPage(self.driver)
+        self.dashboard_page = DashboardPage(self.driver)
+        self.guest_dashboard_page = GuestDashboardPage(self.driver)
+        
+        # Navigate to login page before each test
+        self.login_page.navigate_to_login()
+    
+    def tearDown(self):
+        """Clean up individual test"""
+        duration = time.time() - self.start_time
+        
+        # Record test result
+        test_result = {
+            "test_name": self._testMethodName,
+            "status": "PASS" if self._outcome.success else "FAIL",
+            "duration": round(duration, 2),
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        if not self._outcome.success:
+            # Take screenshot on failure
+            self._take_screenshot()
+            
+            # Record error details
+            errors = []
+            for error in self._outcome.errors + self._outcome.failures:
+                if error[1]:
+                    errors.append(str(error[1]))
+            test_result["errors"] = errors
+        
+        self.__class__.test_results.append(test_result)
+        
+        # Logout if logged in
+        try:
+            current_url = self.driver.current_url
+            if "dashboard" in current_url and "login" not in current_url:
+                self.dashboard_page.logout()
+        except:
+            pass
+    
+    def _take_screenshot(self):
+        """Take screenshot on test failure"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{self._testMethodName}_{timestamp}.png"
+        filepath = os.path.join(TestConfig.SCREENSHOT_DIR, filename)
+        self.driver.save_screenshot(filepath)
+        self.logger.info(f"Screenshot saved: {filepath}")
+    
+    @classmethod
+    def _generate_test_report(cls):
+        """Generate test execution report"""
+        total_tests = len(cls.test_results)
+        passed_tests = len([r for r in cls.test_results if r["status"] == "PASS"])
+        failed_tests = total_tests - passed_tests
+        
+        report = {
+            "execution_summary": {
+                "timestamp": datetime.now().isoformat(),
+                "total_tests": total_tests,
+                "passed": passed_tests,
+                "failed": failed_tests,
+                "success_rate": round((passed_tests / total_tests * 100), 2) if total_tests > 0 else 0,
+                "total_duration": round(sum(r["duration"] for r in cls.test_results), 2)
+            },
+            "test_results": cls.test_results
+        }
+        
+        # Save report
+        report_file = os.path.join(TestConfig.REPORT_DIR, "login_test_report.json")
+        with open(report_file, 'w') as f:
+            json.dump(report, f, indent=2)
+        
+        # Print summary
+        print(f"\n{'='*60}")
+        print("LOGIN TEST EXECUTION SUMMARY")
+        print(f"{'='*60}")
+        print(f"Total Tests: {total_tests}")
+        print(f"Passed: {passed_tests}")
+        print(f"Failed: {failed_tests}")
+        print(f"Success Rate: {report['execution_summary']['success_rate']}%")
+        print(f"Total Duration: {report['execution_summary']['total_duration']}s")
+        print(f"Report saved: {report_file}")
+        print(f"{'='*60}")
+
+# ===========================
+# Login Test Suite
+# ===========================
+
+class LoginFunctionalityTests(LoginTestBase):
+    """Comprehensive login functionality tests"""
+    
+    def test_01_admin_login_success(self):
+        """Test successful admin login"""
+        admin_user = LoginTestData.ADMIN_USERS["admin"]
+        
+        # Perform login
+        old_url = self.login_page.login_as_user(
+            admin_user["username"], 
+            admin_user["password"]
+        )
+        
+        # Wait for redirect
+        self.login_page.wait_for_url_change(old_url)
+        
+        # Verify successful login
+        self.assertTrue(self.dashboard_page.is_dashboard_loaded())
+        self.assertIn(admin_user["expected_redirect"], self.driver.current_url)
+        
+        # Verify admin privileges
+        self.assertTrue(self.dashboard_page.is_admin_menu_visible())
+        
+        # Verify user role display
+        displayed_role = self.dashboard_page.get_user_role()
+        self.assertEqual(displayed_role, admin_user["expected_role"])
+        
+        print("✓ Admin login successful with correct privileges")
+    
+    def test_02_super_admin_login_with_mfa(self):
+        """Test super admin login with MFA"""
+        super_admin = LoginTestData.ADMIN_USERS["super_admin"]
+        
+        # Perform login
+        old_url = self.login_page.login_as_user(
+            super_admin["username"], 
+            super_admin["password"]
+        )
+        
+        if super_admin["mfa_enabled"]:
+            # Check if MFA is required
+            self.assertTrue(self.login_page.is_mfa_required())
+            
+            # Enter MFA code (in real test, this would be dynamic)
+            self.login_page.enter_mfa_code("123456")
+        
+        # Wait for redirect
+        self.login_page.wait_for_url_change(old_url)
+        
+        # Verify successful login
+        self.assertTrue(self.dashboard_page.is_dashboard_loaded())
+        self.assertIn(super_admin["expected_redirect"], self.driver.current_url)
+        
+        print("✓ Super admin login with MFA successful")
+    
+    def test_03_regular_user_login_success(self):
+        """Test successful regular user login"""
+        regular_user = LoginTestData.REGISTERED_USERS["regular_user"]
+        
+        # Perform login
+        old_url = self.login_page.login_as_user(
+            regular_user["username"], 
+            regular_user["password"]
+        )
+        
+        # Wait for redirect
+        self.login_page.wait_for_url_change(old_url)
+        
+        # Verify successful login
+        self.assertTrue(self.dashboard_page.is_dashboard_loaded())
+        self.assertIn(regular_user["expected_redirect"], self.driver.current_url)
+        
+        # Verify user does not have admin privileges
+        self.assertFalse(self.dashboard_page.is_admin_menu_visible())
+        
+        # Verify user role
+        displayed_role = self.dashboard_page.get_user_role()
+        self.assertEqual(displayed_role, regular_user["expected_role"])
+        
+        print("✓ Regular user login successful with appropriate restrictions")
+    
+    def test_04_premium_user_login_success(self):
+        """Test premium user login with premium features"""
+        premium_user = LoginTestData.REGISTERED_USERS["premium_user"]
+        
+        # Perform login
+        old_url = self.login_page.login_as_user(
+            premium_user["username"], 
+            premium_user["password"]
+        )
+        
+        # Wait for redirect
+        self.login_page.wait_for_url_change(old_url)
+        
+        # Verify successful login
+        self.assertTrue(self.dashboard_page.is_dashboard_loaded())
+        
+        # Verify premium features are available
+        self.assertTrue(self.dashboard_page.is_premium_badge_visible())
+        
+        # Verify user role
+        displayed_role = self.dashboard_page.get_user_role()
+        self.assertEqual(displayed_role, premium_user["expected_role"])
+        
+        print("✓ Premium user login successful with premium features")
+    
+    def test_05_trial_user_login_success(self):
+        """Test trial user login"""
+        trial_user = LoginTestData.REGISTERED_USERS["trial_user"]
+        
+        # Perform login
+        old_url = self.login_page.login_as_user(
+            trial_user["username"], 
+            trial_user["password"]
+        )
+        
+        # Wait for redirect
+        self.login_page.wait_for_url_change(old_url)
+        
+        # Verify successful login
+        self.assertTrue(self.dashboard_page.is_dashboard_loaded())
+        
+        # Verify trial information is displayed
+        self.assertTrue(self.dashboard_page.is_element_present(
+            self.dashboard_page.TRIAL_INFO
+        ))
+        
+        print("✓ Trial user login successful with trial information displayed")
+    
+    def test_06_guest_login_success(self):
+        """Test guest login functionality"""
+        # Perform guest login
+        old_url = self.login_page.login_as_guest()
+        
+        # Wait for redirect
+        self.login_page.wait_for_url_change(old_url)
+        
+        # Verify guest dashboard is loaded
+        self.assertTrue(self.guest_dashboard_page.is_guest_dashboard_loaded())
+        
+        # Verify limited access message
+        self.assertTrue(self.guest_dashboard_page.has_limited_access_message())
+        
+        # Verify restricted content is not accessible
+        self.assertFalse(self.guest_dashboard_page.can_access_restricted_content())
+        
+        print("✓ Guest login successful with appropriate limitations")
+    
+    def test_07_suspended_user_login_blocked(self):
+        """Test suspended user cannot login"""
+        suspended_user = LoginTestData.PROBLEM_USERS["suspended_user"]
+        
+        # Attempt login
+        self.login_page.login_as_user(
+            suspended_user["username"], 
+            suspended_user["password"]
+        )
+        
+        # Verify login is blocked
+        status, message = self.login_page.get_account_status_message()
+        self.assertEqual(status, "suspended")
+        self.assertIsNotNone(message)
+        
+        # Verify still on login page
+        self.assertIn("login", self.driver.current_url)
+        
+        print("✓ Suspended user login correctly blocked")
+    
+    def test_08_locked_user_login_blocked(self):
+        """Test locked user cannot login"""
+        locked_user = LoginTestData.PROBLEM_USERS["locked_user"]
+        
+        # Attempt login
+        self.login_page.login_as_user(
+            locked_user["username"], 
+            locked_user["password"]
+        )
+        
+        # Verify login is blocked
+        status, message = self.login_page.get_account_status_message()
+        self.assertEqual(status, "locked")
+        self.assertIsNotNone(message)
+        
+        print("✓ Locked user login correctly blocked")
+    
+    def test_09_password_expired_user_redirect(self):
+        """Test user with expired password is redirected to reset"""
+        expired_user = LoginTestData.PROBLEM_USERS["password_expired_user"]
+        
+        # Attempt login
+        self.login_page.login_as_user(
+            expired_user["username"], 
+            expired_user["password"]
+        )
+        
+        # Verify password expired message
+        status, message = self.login_page.get_account_status_message()
+        self.assertEqual(status, "password_expired")
+        
+        print("✓ Password expired user correctly handled")
+    
+    def test_10_invalid_credentials_error(self):
+        """Test various invalid credential combinations"""
+        for i, invalid_cred in enumerate(LoginTestData.INVALID_CREDENTIALS):
+            with self.subTest(f"Invalid credential test {i+1}"):
+                # Clear any previous state
+                self.login_page.navigate_to_login()
+                
+                # Attempt login with invalid credentials
+                self.login_page.login_as_user(
+                    invalid_cred["username"], 
+                    invalid_cred["password"]
+                )
+                
+                # Verify error message appears
+                error_message = self.login_page.get_error_message()
+                validation_errors = self.login_page.get_validation_errors()
+                
+                self.assertTrue(
+                    error_message is not None or len(validation_errors) > 0,
+                    f"No error shown for invalid credentials: {invalid_cred}"
+                )
+                
+                # Verify still on login page
+                self.assert
