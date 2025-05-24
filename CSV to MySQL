@@ -1,0 +1,475 @@
+#!/usr/bin/env python3
+"""
+CSV to MySQL ETL Script
+A comprehensive script to extract data from CSV files, transform it, and load into MySQL database.
+"""
+
+import pandas as pd
+import mysql.connector
+from mysql.connector import Error
+import logging
+import sys
+import os
+from datetime import datetime
+from typing import Dict, List, Optional, Any
+import argparse
+from pathlib import Path
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('etl_process.log'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
+
+class ETLProcessor:
+    """Main ETL processor class for CSV to MySQL operations."""
+    
+    def __init__(self, config: Dict[str, Any]):
+        """Initialize ETL processor with configuration."""
+        self.config = config
+        self.connection = None
+        self.cursor = None
+        
+    def connect_to_database(self) -> bool:
+        """Establish connection to MySQL database."""
+        try:
+            self.connection = mysql.connector.connect(
+                host=self.config['db_host'],
+                database=self.config['db_name'],
+                user=self.config['db_user'],
+                password=self.config['db_password'],
+                port=self.config.get('db_port', 3306),
+                autocommit=False
+            )
+            
+            if self.connection.is_connected():
+                self.cursor = self.connection.cursor()
+                logger.info(f"Successfully connected to MySQL database: {self.config['db_name']}")
+                return True
+                
+        except Error as e:
+            logger.error(f"Error connecting to MySQL database: {e}")
+            return False
+            
+    def disconnect_from_database(self):
+        """Close database connection and cursor."""
+        if self.cursor:
+            self.cursor.close()
+        if self.connection and self.connection.is_connected():
+            self.connection.close()
+            logger.info("Database connection closed")
+            
+    def extract_data(self, csv_file_path: str) -> Optional[pd.DataFrame]:
+        """
+        Extract data from CSV file.
+        
+        Args:
+            csv_file_path: Path to the CSV file
+            
+        Returns:
+            DataFrame containing the extracted data or None if error
+        """
+        try:
+            if not os.path.exists(csv_file_path):
+                logger.error(f"CSV file not found: {csv_file_path}")
+                return None
+                
+            # Read CSV with various options for robust parsing
+            df = pd.read_csv(
+                csv_file_path,
+                encoding=self.config.get('encoding', 'utf-8'),
+                sep=self.config.get('separator', ','),
+                na_values=self.config.get('na_values', ['', 'NULL', 'null', 'N/A']),
+                dtype=str  # Read all as strings initially to avoid parsing issues
+            )
+            
+            logger.info(f"Successfully extracted {len(df)} rows from {csv_file_path}")
+            logger.info(f"Columns found: {list(df.columns)}")
+            
+            return df
+            
+        except Exception as e:
+            logger.error(f"Error extracting data from CSV: {e}")
+            return None
+            
+    def transform_data(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
+        """
+        Transform the extracted data.
+        
+        Args:
+            df: Raw DataFrame from CSV
+            
+        Returns:
+            Transformed DataFrame or None if error
+        """
+        try:
+            logger.info("Starting data transformation...")
+            
+            # Create a copy to avoid modifying original
+            transformed_df = df.copy()
+            
+            # Clean column names (remove spaces, special characters)
+            transformed_df.columns = [
+                col.strip().lower().replace(' ', '_').replace('-', '_')
+                for col in transformed_df.columns
+            ]
+            
+            # Apply transformations based on configuration
+            transformations = self.config.get('transformations', {})
+            
+            for column, transform_config in transformations.items():
+                if column in transformed_df.columns:
+                    self._apply_column_transformation(transformed_df, column, transform_config)
+            
+            # Handle missing values
+            null_strategy = self.config.get('null_strategy', 'keep')
+            if null_strategy == 'drop':
+                transformed_df = transformed_df.dropna()
+                logger.info("Dropped rows with null values")
+            elif null_strategy == 'fill':
+                fill_value = self.config.get('fill_value', '')
+                transformed_df = transformed_df.fillna(fill_value)
+                logger.info(f"Filled null values with: {fill_value}")
+            
+            # Add metadata columns if specified
+            if self.config.get('add_metadata', False):
+                transformed_df['etl_timestamp'] = datetime.now()
+                transformed_df['source_file'] = os.path.basename(self.config['csv_file'])
+            
+            logger.info(f"Data transformation completed. Final shape: {transformed_df.shape}")
+            return transformed_df
+            
+        except Exception as e:
+            logger.error(f"Error during data transformation: {e}")
+            return None
+            
+    def _apply_column_transformation(self, df: pd.DataFrame, column: str, config: Dict):
+        """Apply specific transformation to a column."""
+        try:
+            transform_type = config.get('type')
+            
+            if transform_type == 'datetime':
+                date_format = config.get('format', '%Y-%m-%d')
+                df[column] = pd.to_datetime(df[column], format=date_format, errors='coerce')
+                
+            elif transform_type == 'numeric':
+                df[column] = pd.to_numeric(df[column], errors='coerce')
+                
+            elif transform_type == 'categorical':
+                df[column] = df[column].astype('category')
+                
+            elif transform_type == 'uppercase':
+                df[column] = df[column].str.upper()
+                
+            elif transform_type == 'lowercase':
+                df[column] = df[column].str.lower()
+                
+            elif transform_type == 'trim':
+                df[column] = df[column].str.strip()
+                
+            logger.info(f"Applied {transform_type} transformation to column: {column}")
+            
+        except Exception as e:
+            logger.warning(f"Error applying transformation to column {column}: {e}")
+            
+    def create_table_if_not_exists(self, df: pd.DataFrame, table_name: str) -> bool:
+        """
+        Create table if it doesn't exist based on DataFrame structure.
+        
+        Args:
+            df: DataFrame to base table structure on
+            table_name: Name of the table to create
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Check if table exists
+            check_query = f"""
+            SELECT COUNT(*) 
+            FROM information_schema.tables 
+            WHERE table_schema = '{self.config['db_name']}' 
+            AND table_name = '{table_name}'
+            """
+            
+            self.cursor.execute(check_query)
+            table_exists = self.cursor.fetchone()[0] > 0
+            
+            if table_exists:
+                logger.info(f"Table {table_name} already exists")
+                return True
+                
+            # Generate CREATE TABLE statement
+            column_definitions = []
+            for column in df.columns:
+                # Determine MySQL data type based on pandas dtype
+                mysql_type = self._get_mysql_type(df[column])
+                column_definitions.append(f"`{column}` {mysql_type}")
+            
+            # Add primary key if specified
+            if self.config.get('primary_key'):
+                pk_column = self.config['primary_key']
+                if pk_column in df.columns:
+                    column_definitions.append(f"PRIMARY KEY (`{pk_column}`)")
+            
+            create_query = f"""
+            CREATE TABLE `{table_name}` (
+                {', '.join(column_definitions)}
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """
+            
+            self.cursor.execute(create_query)
+            self.connection.commit()
+            logger.info(f"Successfully created table: {table_name}")
+            return True
+            
+        except Error as e:
+            logger.error(f"Error creating table {table_name}: {e}")
+            return False
+            
+    def _get_mysql_type(self, series: pd.Series) -> str:
+        """Determine appropriate MySQL data type for a pandas Series."""
+        if series.dtype == 'object':
+            max_length = series.astype(str).str.len().max()
+            if pd.isna(max_length) or max_length <= 255:
+                return "VARCHAR(255)"
+            elif max_length <= 65535:
+                return "TEXT"
+            else:
+                return "LONGTEXT"
+        elif series.dtype in ['int64', 'int32']:
+            return "INT"
+        elif series.dtype in ['float64', 'float32']:
+            return "DECIMAL(10,2)"
+        elif series.dtype == 'datetime64[ns]':
+            return "DATETIME"
+        elif series.dtype == 'bool':
+            return "BOOLEAN"
+        else:
+            return "VARCHAR(255)"
+            
+    def load_data(self, df: pd.DataFrame, table_name: str) -> bool:
+        """
+        Load transformed data into MySQL table.
+        
+        Args:
+            df: Transformed DataFrame to load
+            table_name: Target table name
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            logger.info(f"Starting data load into table: {table_name}")
+            
+            # Create table if it doesn't exist
+            if not self.create_table_if_not_exists(df, table_name):
+                return False
+            
+            # Prepare data for insertion
+            columns = list(df.columns)
+            placeholders = ', '.join(['%s'] * len(columns))
+            column_names = ', '.join([f'`{col}`' for col in columns])
+            
+            # Handle load strategy
+            load_strategy = self.config.get('load_strategy', 'append')
+            
+            if load_strategy == 'replace':
+                # Truncate table first
+                truncate_query = f"TRUNCATE TABLE `{table_name}`"
+                self.cursor.execute(truncate_query)
+                logger.info(f"Truncated table {table_name}")
+            
+            # Insert data in batches
+            batch_size = self.config.get('batch_size', 1000)
+            total_rows = len(df)
+            
+            insert_query = f"""
+            INSERT INTO `{table_name}` ({column_names}) 
+            VALUES ({placeholders})
+            """
+            
+            if load_strategy == 'upsert' and self.config.get('primary_key'):
+                # Use INSERT ... ON DUPLICATE KEY UPDATE
+                pk_column = self.config['primary_key']
+                update_columns = [col for col in columns if col != pk_column]
+                update_clause = ', '.join([f"`{col}` = VALUES(`{col}`)" for col in update_columns])
+                insert_query += f" ON DUPLICATE KEY UPDATE {update_clause}"
+            
+            rows_processed = 0
+            for start_idx in range(0, total_rows, batch_size):
+                end_idx = min(start_idx + batch_size, total_rows)
+                batch_data = df.iloc[start_idx:end_idx]
+                
+                # Convert DataFrame to list of tuples for insertion
+                data_tuples = [tuple(row) for row in batch_data.values]
+                
+                self.cursor.executemany(insert_query, data_tuples)
+                rows_processed += len(data_tuples)
+                
+                logger.info(f"Processed {rows_processed}/{total_rows} rows")
+            
+            self.connection.commit()
+            logger.info(f"Successfully loaded {total_rows} rows into {table_name}")
+            return True
+            
+        except Error as e:
+            logger.error(f"Error loading data into table {table_name}: {e}")
+            self.connection.rollback()
+            return False
+            
+    def run_etl(self) -> bool:
+        """Execute the complete ETL process."""
+        try:
+            logger.info("Starting ETL process...")
+            
+            # Connect to database
+            if not self.connect_to_database():
+                return False
+            
+            # Extract data
+            df = self.extract_data(self.config['csv_file'])
+            if df is None:
+                return False
+            
+            # Transform data
+            transformed_df = self.transform_data(df)
+            if transformed_df is None:
+                return False
+            
+            # Load data
+            success = self.load_data(transformed_df, self.config['table_name'])
+            
+            if success:
+                logger.info("ETL process completed successfully!")
+            else:
+                logger.error("ETL process failed during data loading")
+            
+            return success
+            
+        except Exception as e:
+            logger.error(f"Unexpected error during ETL process: {e}")
+            return False
+            
+        finally:
+            self.disconnect_from_database()
+
+def load_config(config_file: str) -> Dict[str, Any]:
+    """Load configuration from file or return default config."""
+    if os.path.exists(config_file):
+        try:
+            import json
+            with open(config_file, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"Error loading config file {config_file}: {e}")
+    
+    # Return default configuration
+    return {
+        'db_host': 'localhost',
+        'db_name': 'your_database',
+        'db_user': 'your_username',
+        'db_password': 'your_password',
+        'db_port': 3306,
+        'csv_file': 'data.csv',
+        'table_name': 'imported_data',
+        'encoding': 'utf-8',
+        'separator': ',',
+        'load_strategy': 'append',  # 'append', 'replace', 'upsert'
+        'batch_size': 1000,
+        'null_strategy': 'keep',  # 'keep', 'drop', 'fill'
+        'add_metadata': True,
+        'transformations': {
+            # Example transformations
+            # 'date_column': {'type': 'datetime', 'format': '%Y-%m-%d'},
+            # 'price_column': {'type': 'numeric'},
+            # 'name_column': {'type': 'trim'}
+        }
+    }
+
+def create_sample_config():
+    """Create a sample configuration file."""
+    import json
+    
+    sample_config = {
+        "db_host": "localhost",
+        "db_name": "your_database",
+        "db_user": "your_username",
+        "db_password": "your_password",
+        "db_port": 3306,
+        "csv_file": "sample_data.csv",
+        "table_name": "imported_data",
+        "encoding": "utf-8",
+        "separator": ",",
+        "load_strategy": "append",
+        "batch_size": 1000,
+        "null_strategy": "keep",
+        "fill_value": "",
+        "add_metadata": True,
+        "primary_key": "id",
+        "transformations": {
+            "created_date": {
+                "type": "datetime",
+                "format": "%Y-%m-%d"
+            },
+            "amount": {
+                "type": "numeric"
+            },
+            "description": {
+                "type": "trim"
+            }
+        }
+    }
+    
+    with open('etl_config.json', 'w') as f:
+        json.dump(sample_config, f, indent=2)
+    
+    print("Sample configuration file 'etl_config.json' created!")
+
+def main():
+    """Main function to run the ETL script."""
+    parser = argparse.ArgumentParser(description='CSV to MySQL ETL Script')
+    parser.add_argument('--config', '-c', default='etl_config.json',
+                       help='Configuration file path (default: etl_config.json)')
+    parser.add_argument('--create-config', action='store_true',
+                       help='Create a sample configuration file')
+    parser.add_argument('--csv-file', help='CSV file path (overrides config)')
+    parser.add_argument('--table-name', help='Target table name (overrides config)')
+    
+    args = parser.parse_args()
+    
+    if args.create_config:
+        create_sample_config()
+        return
+    
+    # Load configuration
+    config = load_config(args.config)
+    
+    # Override config with command line arguments
+    if args.csv_file:
+        config['csv_file'] = args.csv_file
+    if args.table_name:
+        config['table_name'] = args.table_name
+    
+    # Validate required configuration
+    required_fields = ['db_host', 'db_name', 'db_user', 'db_password', 'csv_file', 'table_name']
+    missing_fields = [field for field in required_fields if not config.get(field)]
+    
+    if missing_fields:
+        logger.error(f"Missing required configuration fields: {missing_fields}")
+        logger.info("Use --create-config to generate a sample configuration file")
+        sys.exit(1)
+    
+    # Run ETL process
+    etl_processor = ETLProcessor(config)
+    success = etl_processor.run_etl()
+    
+    sys.exit(0 if success else 1)
+
+if __name__ == '__main__':
+    main()
