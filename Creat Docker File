@@ -1,0 +1,7 @@
+FROM node:18
+WORKDIR /app
+COPY . .
+RUN npm install
+CMD ["node", "index.js"]
+docker build -t your-dockerhub-user/service-name .
+docker push your-dockerhub-user/service-name
