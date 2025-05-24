@@ -1,0 +1,426 @@
+// API Test Suite - Comprehensive endpoint testing framework
+// flexible testing framework that can verify status codes, JSON response format, and data validation.
+
+class APITestSuite {
+  constructor(baseURL) {
+    this.baseURL = baseURL;
+    this.testResults = [];
+    this.headers = {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json'
+    };
+  }
+
+  // Set custom headers for authentication or other purposes
+  setHeaders(headers) {
+    this.headers = { ...this.headers, ...headers };
+  }
+
+  // Set authorization token
+  setAuthToken(token) {
+    this.headers.Authorization = `Bearer ${token}`;
+  }
+
+  // Generic HTTP request method
+  async makeRequest(method, endpoint, data = null) {
+    const url = `${this.baseURL}${endpoint}`;
+    const options = {
+      method: method.toUpperCase(),
+      headers: this.headers,
+      ...(data && { body: JSON.stringify(data) })
+    };
+
+    try {
+      const response = await fetch(url, options);
+      const responseData = await this.parseResponse(response);
+      
+      return {
+        status: response.status,
+        statusText: response.statusText,
+        headers: Object.fromEntries(response.headers.entries()),
+        data: responseData,
+        ok: response.ok
+      };
+    } catch (error) {
+      throw new Error(`Request failed: ${error.message}`);
+    }
+  }
+
+  // Parse response based on content type
+  async parseResponse(response) {
+    const contentType = response.headers.get('content-type');
+    
+    if (contentType && contentType.includes('application/json')) {
+      try {
+        return await response.json();
+      } catch (error) {
+        throw new Error('Invalid JSON response');
+      }
+    } else if (contentType && contentType.includes('text/')) {
+      return await response.text();
+    } else {
+      return await response.blob();
+    }
+  }
+
+  // Main test method
+  async test(testConfig) {
+    const {
+      name,
+      method = 'GET',
+      endpoint,
+      data = null,
+      expectedStatus = 200,
+      expectedStructure = null,
+      customValidation = null,
+      timeout = 5000
+    } = testConfig;
+
+    const testResult = {
+      name,
+      passed: false,
+      errors: [],
+      response: null,
+      duration: 0
+    };
+
+    const startTime = Date.now();
+
+    try {
+      // Set timeout
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Request timeout')), timeout);
+      });
+
+      const requestPromise = this.makeRequest(method, endpoint, data);
+      const response = await Promise.race([requestPromise, timeoutPromise]);
+
+      testResult.response = response;
+      testResult.duration = Date.now() - startTime;
+
+      // Validate status code
+      if (response.status !== expectedStatus) {
+        testResult.errors.push(
+          `Expected status ${expectedStatus}, got ${response.status}`
+        );
+      }
+
+      // Validate JSON format
+      if (typeof response.data === 'string' && response.data.trim() === '') {
+        testResult.errors.push('Response body is empty');
+      } else if (response.headers['content-type'] && 
+                 response.headers['content-type'].includes('application/json') &&
+                 typeof response.data !== 'object') {
+        testResult.errors.push('Response is not valid JSON');
+      }
+
+      // Validate expected structure
+      if (expectedStructure && response.data) {
+        const structureErrors = this.validateStructure(response.data, expectedStructure);
+        testResult.errors.push(...structureErrors);
+      }
+
+      // Run custom validation
+      if (customValidation && typeof customValidation === 'function') {
+        try {
+          const customErrors = customValidation(response);
+          if (customErrors && Array.isArray(customErrors)) {
+            testResult.errors.push(...customErrors);
+          }
+        } catch (error) {
+          testResult.errors.push(`Custom validation error: ${error.message}`);
+        }
+      }
+
+      testResult.passed = testResult.errors.length === 0;
+
+    } catch (error) {
+      testResult.errors.push(error.message);
+      testResult.duration = Date.now() - startTime;
+    }
+
+    this.testResults.push(testResult);
+    return testResult;
+  }
+
+  // Validate response structure against expected schema
+  validateStructure(data, expectedStructure, path = '') {
+    const errors = [];
+
+    if (typeof expectedStructure !== 'object' || expectedStructure === null) {
+      return errors;
+    }
+
+    for (const [key, expectedType] of Object.entries(expectedStructure)) {
+      const currentPath = path ? `${path}.${key}` : key;
+
+      if (!(key in data)) {
+        errors.push(`Missing required field: ${currentPath}`);
+        continue;
+      }
+
+      const actualValue = data[key];
+
+      if (typeof expectedType === 'string') {
+        // Simple type validation
+        if (expectedType === 'array' && !Array.isArray(actualValue)) {
+          errors.push(`Expected ${currentPath} to be array, got ${typeof actualValue}`);
+        } else if (expectedType !== 'array' && typeof actualValue !== expectedType) {
+          errors.push(`Expected ${currentPath} to be ${expectedType}, got ${typeof actualValue}`);
+        }
+      } else if (typeof expectedType === 'object' && expectedType !== null) {
+        // Nested object validation
+        if (Array.isArray(expectedType)) {
+          // Array with expected item structure
+          if (!Array.isArray(actualValue)) {
+            errors.push(`Expected ${currentPath} to be array`);
+          } else if (actualValue.length > 0 && expectedType.length > 0) {
+            const itemErrors = this.validateStructure(
+              actualValue[0], 
+              expectedType[0], 
+              `${currentPath}[0]`
+            );
+            errors.push(...itemErrors);
+          }
+        } else {
+          // Nested object
+          if (typeof actualValue !== 'object' || actualValue === null) {
+            errors.push(`Expected ${currentPath} to be object`);
+          } else {
+            const nestedErrors = this.validateStructure(
+              actualValue, 
+              expectedType, 
+              currentPath
+            );
+            errors.push(...nestedErrors);
+          }
+        }
+      }
+    }
+
+    return errors;
+  }
+
+  // Run multiple tests
+  async runTestSuite(tests) {
+    console.log(`Running ${tests.length} tests...\n`);
+    
+    for (const test of tests) {
+      const result = await this.test(test);
+      this.logTestResult(result);
+    }
+
+    this.printSummary();
+    return this.testResults;
+  }
+
+  // Log individual test result
+  logTestResult(result) {
+    const status = result.passed ? '✅ PASS' : '❌ FAIL';
+    console.log(`${status} ${result.name} (${result.duration}ms)`);
+    
+    if (!result.passed) {
+      result.errors.forEach(error => {
+        console.log(`   ❌ ${error}`);
+      });
+    }
+    
+    if (result.response) {
+      console.log(`   Status: ${result.response.status} ${result.response.statusText}`);
+    }
+    
+    console.log('');
+  }
+
+  // Print test summary
+  printSummary() {
+    const totalTests = this.testResults.length;
+    const passedTests = this.testResults.filter(r => r.passed).length;
+    const failedTests = totalTests - passedTests;
+
+    console.log('='.repeat(50));
+    console.log('TEST SUMMARY');
+    console.log('='.repeat(50));
+    console.log(`Total Tests: ${totalTests}`);
+    console.log(`Passed: ${passedTests}`);
+    console.log(`Failed: ${failedTests}`);
+    console.log(`Success Rate: ${((passedTests / totalTests) * 100).toFixed(1)}%`);
+    console.log('='.repeat(50));
+  }
+
+  // Get detailed test report
+  getDetailedReport() {
+    return {
+      summary: {
+        total: this.testResults.length,
+        passed: this.testResults.filter(r => r.passed).length,
+        failed: this.testResults.filter(r => !r.passed).length,
+        averageDuration: this.testResults.reduce((sum, r) => sum + r.duration, 0) / this.testResults.length
+      },
+      tests: this.testResults
+    };
+  }
+
+  // Clear test results
+  clearResults() {
+    this.testResults = [];
+  }
+}
+
+// Example usage and test configurations
+async function runExampleTests() {
+  // Initialize test suite
+  const testSuite = new APITestSuite('https://jsonplaceholder.typicode.com');
+  
+  // Example test configurations
+  const tests = [
+    {
+      name: 'Get all posts',
+      method: 'GET',
+      endpoint: '/posts',
+      expectedStatus: 200,
+      expectedStructure: [{
+        userId: 'number',
+        id: 'number',
+        title: 'string',
+        body: 'string'
+      }],
+      customValidation: (response) => {
+        const errors = [];
+        if (!Array.isArray(response.data)) {
+          errors.push('Response should be an array');
+        }
+        if (response.data.length === 0) {
+          errors.push('Posts array should not be empty');
+        }
+        return errors;
+      }
+    },
+    
+    {
+      name: 'Get single post',
+      method: 'GET',
+      endpoint: '/posts/1',
+      expectedStatus: 200,
+      expectedStructure: {
+        userId: 'number',
+        id: 'number',
+        title: 'string',
+        body: 'string'
+      }
+    },
+    
+    {
+      name: 'Create new post',
+      method: 'POST',
+      endpoint: '/posts',
+      data: {
+        title: 'Test Post',
+        body: 'This is a test post',
+        userId: 1
+      },
+      expectedStatus: 201,
+      expectedStructure: {
+        id: 'number',
+        title: 'string',
+        body: 'string',
+        userId: 'number'
+      }
+    },
+    
+    {
+      name: 'Get non-existent post',
+      method: 'GET',
+      endpoint: '/posts/999999',
+      expectedStatus: 404
+    },
+    
+    {
+      name: 'Get users with nested data',
+      method: 'GET',
+      endpoint: '/users',
+      expectedStatus: 200,
+      expectedStructure: [{
+        id: 'number',
+        name: 'string',
+        email: 'string',
+        address: {
+          street: 'string',
+          city: 'string',
+          zipcode: 'string'
+        }
+      }]
+    }
+  ];
+
+  // Run the test suite
+  await testSuite.runTestSuite(tests);
+  
+  // Get detailed report
+  const report = testSuite.getDetailedReport();
+  return report;
+}
+
+// Utility functions for common test patterns
+const TestPatterns = {
+  // Test for paginated responses
+  paginatedResponse: (response) => {
+    const errors = [];
+    const data = response.data;
+    
+    if (!data.hasOwnProperty('data')) {
+      errors.push('Missing "data" field in paginated response');
+    }
+    if (!data.hasOwnProperty('total')) {
+      errors.push('Missing "total" field in paginated response');
+    }
+    if (!data.hasOwnProperty('page')) {
+      errors.push('Missing "page" field in paginated response');
+    }
+    if (!data.hasOwnProperty('limit')) {
+      errors.push('Missing "limit" field in paginated response');
+    }
+    
+    return errors;
+  },
+
+  // Test for error responses
+  errorResponse: (response) => {
+    const errors = [];
+    const data = response.data;
+    
+    if (!data.hasOwnProperty('error')) {
+      errors.push('Missing "error" field in error response');
+    }
+    if (!data.hasOwnProperty('message')) {
+      errors.push('Missing "message" field in error response');
+    }
+    
+    return errors;
+  },
+
+  // Test for success responses
+  successResponse: (response) => {
+    const errors = [];
+    const data = response.data;
+    
+    if (!data.hasOwnProperty('success')) {
+      errors.push('Missing "success" field in response');
+    }
+    if (data.success !== true) {
+      errors.push('Success field should be true');
+    }
+    
+    return errors;
+  }
+};
+
+// Export for use in other modules
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { APITestSuite, TestPatterns };
+}
+
+// Run example tests if this file is executed directly
+if (typeof window !== 'undefined') {
+  console.log('API Test Suite loaded. Call runExampleTests() to see it in action.');
+}
